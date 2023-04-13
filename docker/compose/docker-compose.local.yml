@@ -1,0 +1,121 @@
+version: "3.5"
+services:
+  app:
+    image: todo-app:dev
+    build:
+      context: ../../
+      dockerfile: ./docker/django/Dockerfile
+    container_name: app
+    restart: always
+    command: >
+      bash -c "
+                ./docker/wait-for.sh db:5432 -- echo \"db run successfully\" &&
+                find . -name \*.pyc -delete &&
+                cd /todo-app && python manage.py collectstatic --noinput &&
+                gunicorn backend.wsgi:application -b :8080 -w 2 --reload -t 15 --env DJANGO_SETTINGS_MODULE='backend.settings'"
+    env_file:
+      - ../environment/app.local.env
+    volumes:
+      - ../../backend/:/todo-app/backend/
+    ports:
+      - "8080:8080"
+    depends_on:
+      - db
+    networks:
+      - default
+
+
+  redis:
+    image: redis
+    container_name: redis
+    ports:
+      - "6379:6379"
+    networks:
+      - default
+
+  rabbit:
+    image: rabbitmq:3-management
+    container_name: rabbitmq
+    ports:
+      - "15672:15672"
+      - "5672:5672"
+    networks:
+      - default
+    environment:
+      - RABBITMQ_DEFAULT_USER=todo
+      - RABBITMQ_DEFAULT_PASS=T7sd78sVai3jDNs
+    env_file:
+      - ../environment/app.local.env
+
+  celery:
+    image: todo-app:dev
+    container_name: celery
+    depends_on:
+      - db
+      - redis
+      - rabbit
+    env_file:
+      - ../environment/app.local.env
+    volumes:
+      - ../../backend/apps:/todo-app/backend/apps
+      - ../../backend/settings:/todo-app/backend/settings
+    command: >
+      bash -c "
+              ./docker/wait-for.sh rabbitmq:15672 -- echo \"rabbit run successfully\" &&
+              celery -A backend worker -Q default --concurrency=4 --loglevel=info -n primary@%h -E
+              "
+    networks:
+      - default
+
+  celery-beat:
+    image: todo-app:dev
+    container_name: celery-beat
+    depends_on:
+      - db
+      - redis
+      - rabbit
+    volumes:
+      - ../../backend/apps:/todo-app/backend/apps
+      - ../../backend/settings:/todo-app/backend/settings
+    command: >
+      bash -c "
+              ./docker/wait-for.sh rabbitmq:15672 -- echo \"rabbit run successfully\" &&
+              celery -A backend beat --loglevel=info"
+    env_file:
+      - ../environment/app.local.env
+    networks:
+      - default
+
+  migrations:
+    image: todo-app:dev
+    container_name: migrations
+    volumes:
+      - ../../backend/apps:/todo-app/backend/apps
+      - ../../backend/settings:/todo-app/backend/settings
+    command: >
+      bash -c "
+                ./docker/wait-for.sh db:5432 -- echo \"db run successfully\" &&
+                export PGPASSWORD=eUFkAPHVbXMr26kWp4Ws &&
+                psql -h db -p 5432 -U postgres -f ./docker/db/init.sql &&
+                python manage.py migrate && python manage.py create_superuser"
+    depends_on:
+      - db
+    env_file:
+      - ../environment/app.local.env
+    networks:
+      - default
+
+  db:
+    image: postgres:14
+    container_name: db
+    ports:
+      - "5432:5432"
+    env_file:
+      - ../environment/db.local.env
+    networks:
+      - default
+
+
+networks:
+  default:
+    driver: "bridge"
